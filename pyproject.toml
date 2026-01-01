@@ -1,0 +1,17 @@
+[project]
+name = "protonproxy"
+version = "0.1.0"
+description = "ProtonVPN browser extension proxy for global use"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+protonproxy = "protonproxy.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
