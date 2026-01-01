@@ -7,8 +7,11 @@ import socket
 import ssl
 import sys
 import threading
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
+
+import socks
 
 from .credentials import get_credentials, Credentials
 from .servers import Logical
@@ -16,11 +19,61 @@ from .servers import Logical
 # Enable debug mode via environment variable
 DEBUG = os.environ.get("PROTONPROXY_DEBUG", "").lower() in ("1", "true", "yes")
 
+# Global upstream proxy configuration
+_upstream_proxy: Optional["UpstreamProxy"] = None
+
 
 def debug_log(*args):
     """Print debug message if DEBUG is enabled."""
     if DEBUG:
         print("[DEBUG]", *args, file=sys.stderr)
+
+
+@dataclass
+class UpstreamProxy:
+    """Upstream proxy configuration."""
+    
+    type: str  # "socks5", "socks4", "http"
+    host: str
+    port: int
+    username: Optional[str] = None
+    password: Optional[str] = None
+    
+    @classmethod
+    def from_url(cls, url: str) -> "UpstreamProxy":
+        """Parse proxy URL like socks5://user:pass@host:port or http://host:port"""
+        parsed = urlparse(url)
+        
+        proxy_type = parsed.scheme.lower()
+        if proxy_type not in ("socks5", "socks4", "http", "https"):
+            raise ValueError(f"Unsupported proxy type: {proxy_type}")
+        
+        host = parsed.hostname
+        port = parsed.port
+        
+        if not host or not port:
+            raise ValueError(f"Invalid proxy URL: {url}")
+        
+        return cls(
+            type=proxy_type,
+            host=host,
+            port=port,
+            username=parsed.username,
+            password=parsed.password,
+        )
+
+
+def set_upstream_proxy(proxy: Optional[UpstreamProxy]) -> None:
+    """Set global upstream proxy configuration."""
+    global _upstream_proxy
+    _upstream_proxy = proxy
+    if proxy:
+        debug_log(f"Upstream proxy set: {proxy.type}://{proxy.host}:{proxy.port}")
+
+
+def get_upstream_proxy() -> Optional[UpstreamProxy]:
+    """Get current upstream proxy configuration."""
+    return _upstream_proxy
 
 
 class ProxyHandler:
@@ -43,6 +96,72 @@ class ProxyHandler:
         encoded = base64.b64encode(auth.encode()).decode()
         return f"Basic {encoded}"
 
+    def _create_upstream_socket(self, target_host: str, target_port: int) -> socket.socket:
+        """Create socket, optionally through upstream proxy."""
+        upstream = get_upstream_proxy()
+        
+        if upstream is None:
+            # Direct connection
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(30)
+            sock.connect((target_host, target_port))
+            return sock
+        
+        debug_log(f"Connecting via upstream {upstream.type}://{upstream.host}:{upstream.port}")
+        
+        if upstream.type in ("socks5", "socks4"):
+            # Use PySocks for SOCKS proxy
+            proxy_type = socks.SOCKS5 if upstream.type == "socks5" else socks.SOCKS4
+            sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.set_proxy(
+                proxy_type,
+                upstream.host,
+                upstream.port,
+                username=upstream.username,
+                password=upstream.password,
+            )
+            sock.settimeout(30)
+            sock.connect((target_host, target_port))
+            return sock
+        
+        elif upstream.type in ("http", "https"):
+            # HTTP CONNECT tunnel
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(30)
+            sock.connect((upstream.host, upstream.port))
+            
+            # Send CONNECT request
+            connect_req = f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
+            connect_req += f"Host: {target_host}:{target_port}\r\n"
+            
+            if upstream.username and upstream.password:
+                auth = base64.b64encode(
+                    f"{upstream.username}:{upstream.password}".encode()
+                ).decode()
+                connect_req += f"Proxy-Authorization: Basic {auth}\r\n"
+            
+            connect_req += "\r\n"
+            sock.sendall(connect_req.encode())
+            
+            # Read response
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("Upstream proxy closed connection")
+                response += chunk
+            
+            # Check status
+            status_line = response.split(b"\r\n")[0].decode()
+            if "200" not in status_line:
+                raise ConnectionError(f"Upstream proxy error: {status_line}")
+            
+            debug_log(f"Upstream tunnel established: {status_line}")
+            return sock
+        
+        else:
+            raise ValueError(f"Unsupported upstream proxy type: {upstream.type}")
+
     def _connect_to_proton(self) -> socket.socket:
         """Establish SSL connection to Proton proxy server."""
         best = self.server.get_best_server()
@@ -54,14 +173,14 @@ class ProxyHandler:
 
         debug_log(f"Connecting to {host}:{port}")
 
-        # Create SSL socket
+        # Create socket (direct or through upstream proxy)
+        raw_socket = self._create_upstream_socket(host, port)
+        
+        # Wrap with SSL
         context = ssl.create_default_context()
-        raw_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        raw_socket.settimeout(30)
         
         try:
             ssl_socket = context.wrap_socket(raw_socket, server_hostname=host)
-            ssl_socket.connect((host, port))
             debug_log(f"SSL connection established to {host}:{port}")
             return ssl_socket
         except ssl.SSLError as e:

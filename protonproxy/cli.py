@@ -10,7 +10,7 @@ from . import __version__
 from .api import api, ProtonAPIError
 from .auth import login_interactive, logout, check_login
 from .credentials import clear_credentials
-from .proxy import LocalProxy
+from .proxy import LocalProxy, UpstreamProxy, set_upstream_proxy
 from .servers import (
     get_servers,
     get_countries,
@@ -137,6 +137,16 @@ def cmd_connect(args) -> int:
                 console.print("[red]No servers available[/red]")
                 return 1
 
+        # Configure upstream proxy if specified
+        if args.upstream:
+            try:
+                upstream = UpstreamProxy.from_url(args.upstream)
+                set_upstream_proxy(upstream)
+                console.print(f"[cyan]🔗 Using upstream proxy: {args.upstream}[/cyan]")
+            except ValueError as e:
+                console.print(f"[red]Invalid upstream proxy: {e}[/red]")
+                return 1
+
         # Start proxy
         proxy = LocalProxy(host=args.host, port=args.port)
         proxy.start(server)
@@ -209,6 +219,10 @@ def main() -> int:
     )
     connect_parser.add_argument(
         "--port", type=int, default=8080, help="Local proxy port (default: 8080)"
+    )
+    connect_parser.add_argument(
+        "--upstream", "-u",
+        help="Upstream proxy URL (e.g., socks5://127.0.0.1:1080 or http://proxy:8080)"
     )
     connect_parser.set_defaults(func=cmd_connect)
 
