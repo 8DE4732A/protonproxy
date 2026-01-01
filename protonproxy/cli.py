@@ -159,6 +159,21 @@ def cmd_connect(args) -> int:
         return 0
 
 
+def cmd_gui(args) -> int:
+    """Handle gui command."""
+    try:
+        from .gui import main as gui_main
+        gui_main()
+        return 0
+    except ImportError as e:
+        console.print(f"[red]Error: Could not import GUI modules. {e}[/red]")
+        console.print("[yellow]Hint: Make sure tkinter is installed (e.g., sudo apt-get install python3-tk)[/yellow]")
+        return 1
+    except Exception as e:
+        console.print(f"[red]Error launching GUI: {e}[/red]")
+        return 1
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -225,6 +240,10 @@ def main() -> int:
         help="Upstream proxy URL (e.g., socks5://127.0.0.1:1080 or http://proxy:8080)"
     )
     connect_parser.set_defaults(func=cmd_connect)
+
+    # gui
+    gui_parser = subparsers.add_parser("gui", help="Launch graphical user interface")
+    gui_parser.set_defaults(func=cmd_gui)
 
     args = parser.parse_args()
 
