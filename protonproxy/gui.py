@@ -44,7 +44,19 @@ class ProtonProxyGUI:
         sys.stdout = LogRedirector(self.log_area)
         sys.stderr = LogRedirector(self.log_area)
 
+    def _set_icon(self):
+        """Set application icon."""
+        import os
+        try:
+            # Load icon from the package directory
+            icon_path = os.path.join(os.path.dirname(__file__), "com.protonvpn.www.png")
+            img = tk.PhotoImage(file=icon_path)
+            self.root.iconphoto(True, img)
+        except Exception as e:
+            print(f"Failed to set icon: {e}")
+
     def _setup_ui(self):
+        self._set_icon()
         # Main layout
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)

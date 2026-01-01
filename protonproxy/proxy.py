@@ -1,5 +1,6 @@
 """Local HTTP proxy server that forwards traffic through ProtonVPN."""
 
+import struct
 import base64
 import os
 import select
@@ -242,6 +243,101 @@ class ProxyHandler:
         # Relay response
         self._relay_data()
 
+    def _handle_socks5(self) -> None:
+        """Handle SOCKS5 request."""
+        # 1. Negotiation
+        # Ver, NMethods, Methods
+        header = self.client.recv(2)
+        if not header or header[0] != 0x05:
+            return
+        
+        n_methods = header[1]
+        methods = self.client.recv(n_methods)
+        
+        # We don't require auth for local SOCKS5 proxy
+        # Respond: Ver(05) Method(00 - No auth)
+        self.client.sendall(b"\x05\x00")
+        
+        # 2. Request
+        # Ver(05) Cmd(01=Connect) Rsv(00) Atyp(01=IPv4, 03=Domain, 04=IPv6) DstAddr DstPort
+        request = self.client.recv(4)
+        if not request or request[0] != 0x05 or request[1] != 0x01: # Only CONNECT
+            # Unsupported or invalid
+            return
+            
+        atyp = request[3]
+        if atyp == 0x01: # IPv4
+            addr = self.client.recv(4)
+            host = socket.inet_ntoa(addr)
+        elif atyp == 0x03: # Domain
+            addr_len = self.client.recv(1)[0]
+            host = self.client.recv(addr_len).decode()
+        elif atyp == 0x04: # IPv6
+            # Not fully supported for now, but parse it
+            addr = self.client.recv(16)
+            host = socket.inet_ntop(socket.AF_INET6, addr)
+        else:
+            # Bad ATYP
+            return
+            
+        port_bytes = self.client.recv(2)
+        port = struct.unpack("!H", port_bytes)[0]
+        
+        debug_log(f"SOCKS5 Connect to {host}:{port}")
+        
+        try:
+            # Connect to upstream via Proton
+            self.proton_socket = self._connect_to_proton()
+            
+            # Since _connect_to_proton creates a tunnel to the proton server,
+            # we now need to tell the proton server where to go? 
+            # WAIT. _connect_to_proton connects to the Proton Proxy Server (Exit Node).
+            # The Proton Proxy accepts HTTP CONNECT methods.
+            # So even if our client speaks SOCKS5, we must translate that to HTTP CONNECT 
+            # when talking to the Proton Proxy.
+            
+            # Send CONNECT to Proton Proxy
+            connect_req = f"CONNECT {host}:{port} HTTP/1.1\r\n"
+            connect_req += f"Host: {host}:{port}\r\n"
+            
+            # Auth
+            auth_header = f"Proxy-Authorization: {self._get_proxy_auth_header()}\r\n"
+            connect_req += auth_header
+            connect_req += "\r\n"
+            
+            self.proton_socket.sendall(connect_req.encode())
+            
+            # Read response from Proton
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = self.proton_socket.recv(4096)
+                if not chunk:
+                    raise ConnectionError("Proton proxy closed connection")
+                response += chunk
+                
+            status_line = response.split(b"\r\n")[0].decode()
+            if "200" in status_line:
+                # Success. Reply to SOCKS5 client.
+                # Ver(05) Rep(00=Success) Rsv(00) Atyp(01) BindAddr(0.0.0.0) BindPort(0)
+                reply = b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+                self.client.sendall(reply)
+                debug_log(f"SOCKS5 tunnel established to {host}:{port}")
+                self._relay_data()
+            else:
+                # Failure
+                debug_log(f"Proton handshake failed: {status_line}")
+                # Reply generic failure (01)
+                reply = b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00"
+                self.client.sendall(reply)
+                
+        except Exception as e:
+            debug_log(f"SOCKS5 error: {e}")
+            try:
+                # Connection refused (05) or just failure (01)
+                self.client.sendall(b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00")
+            except:
+                pass
+
     def _add_proxy_auth(self, request: bytes) -> bytes:
         """Add Proxy-Authorization header to request."""
         # Don't include \r\n here - the join() will add it
@@ -318,7 +414,19 @@ class ProxyHandler:
     def handle(self) -> None:
         """Handle the proxy request."""
         try:
-            # Read request
+            # Peek first byte to detect protocol
+            # SOCKS5 starts with 0x05, HTTP starts with ASCII method (GET, POST, CONNECT, etc.)
+            first_byte = self.client.recv(1, socket.MSG_PEEK)
+            if not first_byte:
+                return
+            
+            if first_byte[0] == 0x05:
+                # SOCKS5 protocol
+                debug_log("Detected SOCKS5 protocol")
+                self._handle_socks5()
+                return
+
+            # HTTP protocol - read full request
             request = b""
             while b"\r\n\r\n" not in request:
                 chunk = self.client.recv(4096)
@@ -359,9 +467,13 @@ class ProxyHandler:
 
 
 class LocalProxy:
-    """Local HTTP proxy server."""
+    """Local HTTP/SOCKS5 proxy server (auto-detect protocol)."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8080):
+    def __init__(
+        self, 
+        host: str = "127.0.0.1", 
+        port: int = 8080,
+    ):
         self.host = host
         self.port = port
         self.server_socket: Optional[socket.socket] = None
@@ -383,24 +495,36 @@ class LocalProxy:
         self.server_socket.listen(100)
         self.server_socket.settimeout(1)  # Allow checking running flag
 
-        print(f"🌐 Proxy server listening on {self.host}:{self.port}")
+        print(f"🌐 Proxy server listening on {self.host}:{self.port} (HTTP + SOCKS5)")
         print(f"📡 Connected to {server.name} ({server.exit_country})")
         print(f"   Upstream: {server.domain}:{server.proxy_port}")
         print("\n   Configure your app to use:")
-        print(f"   HTTP Proxy: {self.host}:{self.port}")
+        print(f"   HTTP Proxy:   {self.host}:{self.port}")
+        print(f"   SOCKS5 Proxy: {self.host}:{self.port}")
         print("\n   Press Ctrl+C to stop\n")
 
         try:
             while self.running:
+                if not self.server_socket:
+                    break
+
                 try:
-                    client_socket, addr = self.server_socket.accept()
-                    # Get fresh credentials for each connection
-                    credentials = get_credentials()
-                    handler = ProxyHandler(client_socket, self.current_server, credentials)
-                    thread = threading.Thread(target=handler.handle, daemon=True)
-                    thread.start()
-                except socket.timeout:
+                    readable, _, _ = select.select([self.server_socket], [], [], 1.0)
+                except (ValueError, OSError):
                     continue
+                    
+                for ready_sock in readable:
+                    try:
+                        client_socket, addr = ready_sock.accept()
+                        # Get fresh credentials for each connection
+                        credentials = get_credentials()
+                        handler = ProxyHandler(client_socket, self.current_server, credentials)
+                        thread = threading.Thread(target=handler.handle, daemon=True)
+                        thread.start()
+                    except socket.timeout:
+                        pass
+                    except OSError:
+                        pass
         except KeyboardInterrupt:
             print("\n⏹️  Stopping proxy server...")
         finally:
