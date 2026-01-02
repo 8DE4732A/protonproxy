@@ -5,6 +5,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import webbrowser
+import requests
 from typing import Optional, List
 
 from .api import api, ProtonAPIError
@@ -137,6 +138,9 @@ class ProtonProxyGUI:
 
         self.stop_btn = ttk.Button(control_frame, text="Stop Proxy", command=self._handle_stop, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
+
+        self.check_btn = ttk.Button(control_frame, text="Check Connection", command=self._handle_check_connection)
+        self.check_btn.pack(side=tk.LEFT, padx=5)
 
         # Log Area
         log_frame = ttk.LabelFrame(main_frame, text="Logs", padding="5")
@@ -286,6 +290,50 @@ class ProtonProxyGUI:
         self.host_entry.configure(state=tk.NORMAL)
         self.port_entry.configure(state=tk.NORMAL)
         self.upstream_entry.configure(state=tk.NORMAL)
+
+    def _handle_check_connection(self):
+        """Check if proxy connection is working."""
+        if not self.proxy or not self.proxy.running:
+            messagebox.showwarning("Warning", "Proxy is not running. Please start the proxy first.")
+            return
+
+        self.check_btn.configure(state=tk.DISABLED)
+        self.status_var.set("Status: Checking connection...")
+        
+        thread = threading.Thread(target=self._run_check, daemon=True)
+        thread.start()
+
+    def _run_check(self):
+        host = self.host_entry.get()
+        port = self.port_entry.get()
+        proxies = {
+            "http": f"http://{host}:{port}",
+            "https": f"http://{host}:{port}",
+        }
+        
+        try:
+            # First check without proxy to get real IP (optional, but good for comparison? No, just check proxy)
+            # Just check if we can reach an IP echo service via proxy
+            response = requests.get("http://ip-api.com/json", proxies=proxies, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            result_msg = (
+                f"Connection Successful!\n\n"
+                f"IP: {data.get('query')}\n"
+                f"Country: {data.get('country')}\n"
+                f"ISP: {data.get('isp')}"
+            )
+            
+            self.root.after(0, lambda: messagebox.showinfo("Success", result_msg))
+            self.root.after(0, lambda: self.status_var.set("Status: Connected"))
+            
+        except Exception as e:
+            error_msg = f"Connection check failed:\n{str(e)}"
+            self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
+            self.root.after(0, lambda: self.status_var.set("Status: Connection Failed"))
+        finally:
+             self.root.after(0, lambda: self.check_btn.configure(state=tk.NORMAL))
 
 def main():
     root = tk.Tk()
