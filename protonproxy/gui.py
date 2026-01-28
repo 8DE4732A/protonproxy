@@ -1,5 +1,6 @@
 """Tkinter GUI for ProtonVPN proxy."""
 
+import json
 import sys
 import threading
 import tkinter as tk
@@ -7,6 +8,7 @@ from tkinter import ttk, messagebox, scrolledtext
 import webbrowser
 import requests
 from typing import Optional, List
+from pathlib import Path
 
 from .api import api, ProtonAPIError
 from .auth import get_login_url, generate_state, parse_selector_input, consume_fork, check_login, logout
@@ -37,8 +39,10 @@ class ProtonProxyGUI:
         self.proxy: Optional[LocalProxy] = None
         self.proxy_thread: Optional[threading.Thread] = None
         self.servers: List[Logical] = []
+        self.proxy_config_file = Path.home() / ".protonproxy" / "proxy_config.json"
         
         self._setup_ui()
+        self._load_proxy_config()
         self._update_status()
         
         # Redirect stdout to logs
@@ -148,6 +152,44 @@ class ProtonProxyGUI:
         
         self.log_area = scrolledtext.ScrolledText(log_frame, height=10, state='disabled', font=("Monaco", 10))
         self.log_area.pack(fill=tk.BOTH, expand=True)
+
+    def _load_proxy_config(self) -> None:
+        if not self.proxy_config_file.exists():
+            return
+        try:
+            data = json.loads(self.proxy_config_file.read_text())
+        except json.JSONDecodeError:
+            return
+
+        host = data.get("host")
+        port = data.get("port")
+        upstream = data.get("upstream")
+
+        if host:
+            self.host_entry.delete(0, tk.END)
+            self.host_entry.insert(0, host)
+        if port:
+            self.port_entry.delete(0, tk.END)
+            self.port_entry.insert(0, str(port))
+        if upstream is not None:
+            self.upstream_entry.delete(0, tk.END)
+            self.upstream_entry.insert(0, upstream)
+
+    def _save_proxy_config(self) -> None:
+        host = self.host_entry.get().strip()
+        port = self.port_entry.get().strip()
+        upstream = self.upstream_entry.get().strip()
+
+        self.proxy_config_file.parent.mkdir(parents=True, exist_ok=True)
+        self.proxy_config_file.write_text(
+            json.dumps(
+                {
+                    "host": host,
+                    "port": port,
+                    "upstream": upstream,
+                }
+            )
+        )
 
     def _update_status(self):
         if check_login():
@@ -270,6 +312,7 @@ class ProtonProxyGUI:
         else:
             set_upstream_proxy(None)
 
+        self._save_proxy_config()
         self.proxy = LocalProxy(host=host, port=port)
         self.proxy_thread = threading.Thread(target=self.proxy.start, args=(server,), daemon=True)
         self.proxy_thread.start()
@@ -341,6 +384,7 @@ def main():
     def on_closing():
         # Stop proxy if running
         # sys.exit will handle thread termination if daemon=True
+        app._save_proxy_config()
         root.destroy()
         sys.exit(0)
     
