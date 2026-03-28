@@ -10,7 +10,7 @@ import requests
 from typing import Optional, List
 from pathlib import Path
 
-from .api import api, ProtonAPIError
+from .api import api
 from .auth import get_login_url, generate_state, parse_selector_input, consume_fork, check_login, logout
 from .servers import get_servers, get_countries, Logical, get_server_by_name
 from .proxy import LocalProxy, UpstreamProxy, set_upstream_proxy
@@ -42,12 +42,14 @@ class ProtonProxyGUI:
         self.proxy_config_file = Path.home() / ".protonproxy" / "proxy_config.json"
         
         self._setup_ui()
-        self._load_proxy_config()
-        self._update_status()
-        
+
         # Redirect stdout to logs
         sys.stdout = LogRedirector(self.log_area)
         sys.stderr = LogRedirector(self.log_area)
+
+        self._load_proxy_config()
+        self._apply_upstream_proxy(show_errors=False)
+        self._update_status()
 
     def _set_icon(self):
         """Set application icon."""
@@ -191,16 +193,43 @@ class ProtonProxyGUI:
             )
         )
 
+    def _apply_upstream_proxy(self, show_errors: bool = True) -> bool:
+        upstream_url = self.upstream_entry.get().strip()
+        if not upstream_url:
+            set_upstream_proxy(None)
+            return True
+
+        try:
+            upstream = UpstreamProxy.from_url(upstream_url)
+        except ValueError as e:
+            set_upstream_proxy(None)
+            if show_errors:
+                messagebox.showerror("Error", f"Invalid upstream proxy: {e}")
+            else:
+                print(f"Invalid upstream proxy: {e}")
+            return False
+
+        set_upstream_proxy(upstream)
+        return True
+
+    def _clear_server_list(self) -> None:
+        self.servers = []
+        self.server_tree.delete(*self.server_tree.get_children())
+
     def _update_status(self):
         if check_login():
             self.status_var.set("Status: Logged In")
             self.login_btn.configure(state=tk.DISABLED)
             self.logout_btn.configure(state=tk.NORMAL)
             self._refresh_countries()
-        else:
-            self.status_var.set("Status: Not Logged In")
-            self.login_btn.configure(state=tk.NORMAL)
-            self.logout_btn.configure(state=tk.DISABLED)
+            return
+
+        self.status_var.set("Status: Not Logged In")
+        self.login_btn.configure(state=tk.NORMAL)
+        self.logout_btn.configure(state=tk.DISABLED)
+        self.country_cb.set("")
+        self.country_cb['values'] = []
+        self._clear_server_list()
 
     def _handle_login(self):
         state = generate_state()
@@ -250,35 +279,44 @@ class ProtonProxyGUI:
         try:
             countries = get_countries(free_only=not self.all_tiers_var.get())
             self.country_cb['values'] = ["All"] + countries
-            if not self.country_cb.get():
+            if not self.country_cb.get() or self.country_cb.get() not in self.country_cb['values']:
                 self.country_cb.set("All")
             self._refresh_servers()
         except Exception as e:
+            self.country_cb.set("All")
+            self.country_cb['values'] = ["All"]
+            self._clear_server_list()
             print(f"Error fetching countries: {e}")
 
     def _on_country_selected(self, event):
         self._refresh_servers()
 
     def _refresh_servers(self):
-        if not check_login():
-            return
-            
         try:
+            if not check_login():
+                self._clear_server_list()
+                return
+
+            if not self._apply_upstream_proxy(show_errors=False):
+                self._clear_server_list()
+                return
+
             country = self.country_cb.get()
             if country == "All":
                 country = None
-                
+
             self.servers = get_servers(
                 country=country,
                 free_only=not self.all_tiers_var.get()
             )
-            
+
             self.server_tree.delete(*self.server_tree.get_children())
             for s in self.servers:
                 tier = "Free" if s.is_free() else "Plus"
                 load = f"{s.load}%" if s.load is not None else "-"
                 self.server_tree.insert("", tk.END, values=(s.name, s.exit_country, s.city or "-", tier, load))
         except Exception as e:
+            self._clear_server_list()
             print(f"Error fetching servers: {e}")
 
     def _handle_start(self):
@@ -301,16 +339,8 @@ class ProtonProxyGUI:
             messagebox.showerror("Error", "Invalid port number.")
             return
 
-        upstream_url = self.upstream_entry.get().strip()
-        if upstream_url:
-            try:
-                upstream = UpstreamProxy.from_url(upstream_url)
-                set_upstream_proxy(upstream)
-            except ValueError as e:
-                messagebox.showerror("Error", f"Invalid upstream proxy: {e}")
-                return
-        else:
-            set_upstream_proxy(None)
+        if not self._apply_upstream_proxy():
+            return
 
         self._save_proxy_config()
         self.proxy = LocalProxy(host=host, port=port)

@@ -82,6 +82,23 @@ class ProtonAPI:
             headers["Authorization"] = f"Bearer {self.access_token}"
         return headers
 
+    def _get_proxies(self) -> Optional[dict[str, str]]:
+        """Build requests proxy configuration from current upstream proxy."""
+        from .proxy import get_upstream_proxy
+
+        upstream = get_upstream_proxy()
+        if upstream is None:
+            return None
+
+        auth = ""
+        if upstream.username and upstream.password:
+            auth = f"{upstream.username}:{upstream.password}@"
+        elif upstream.username:
+            auth = f"{upstream.username}@"
+
+        proxy_url = f"{upstream.type}://{auth}{upstream.host}:{upstream.port}"
+        return {"http": proxy_url, "https": proxy_url}
+
     def request(
         self,
         method: str,
@@ -93,12 +110,13 @@ class ProtonAPI:
         """Make API request with automatic token refresh."""
         url = urljoin(BASE_URL, endpoint)
         headers = self._get_headers(include_auth)
+        proxies = self._get_proxies()
 
         if method.upper() == "GET":
-            response = self.session.get(url, headers=headers, params=data)
+            response = self.session.get(url, headers=headers, params=data, proxies=proxies)
         else:
             response = self.session.request(
-                method, url, headers=headers, json=data
+                method, url, headers=headers, json=data, proxies=proxies
             )
 
         # Handle 401 - try token refresh

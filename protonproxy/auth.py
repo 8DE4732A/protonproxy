@@ -3,6 +3,8 @@
 import base64
 import secrets
 import webbrowser
+
+import requests
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .api import api, ProtonAPIError
@@ -157,5 +159,5 @@ def check_login() -> bool:
         # Verify session is still valid
         api.get("vpn/v1")
         return True
-    except ProtonAPIError:
+    except (ProtonAPIError, requests.RequestException):
         return False
